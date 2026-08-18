@@ -5,8 +5,82 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Store chat sessions (simple in-memory)
+// Store chat sessions
 const userSessions = {};
+let qrCode = 'No QR code yet. Waiting for connection...';
+let botStatus = 'Connecting...';
+
+// Express route to show QR code on webpage
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>WhatsApp Bot</title>
+      <style>
+        body { font-family: Arial; text-align: center; padding: 50px; background: #0a0a0a; color: #fff; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .status { background: #1a1a1a; padding: 20px; border-radius: 10px; margin: 20px 0; }
+        .qr-container { background: #fff; padding: 20px; border-radius: 10px; display: inline-block; }
+        .qr-container img { max-width: 300px; }
+        .info { color: #888; font-size: 14px; }
+        .success { color: #4CAF50; }
+        .error { color: #f44336; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>🤖 WhatsApp Bot</h1>
+        <div class="status">
+          <h3>Status: <span id="status">${botStatus}</span></h3>
+        </div>
+        <div id="qrSection" class="qr-container">
+          <p>Scan QR Code with WhatsApp</p>
+          <div id="qrImage">${qrCode}</div>
+          <p class="info">Open WhatsApp → Linked Devices → Link a Device</p>
+        </div>
+        <div id="connectedSection" style="display:none;">
+          <h2 class="success">✅ Bot Connected!</h2>
+          <p>Your bot is now active. Send a message to test it!</p>
+        </div>
+        <p class="info">Bot is running on Render.com</p>
+      </div>
+      <script>
+        // Auto-refresh every 5 seconds to check for QR code
+        setInterval(() => {
+          fetch('/qr-status')
+            .then(res => res.json())
+            .then(data => {
+              document.getElementById('status').textContent = data.status;
+              if (data.qr && data.qr !== 'No QR code yet. Waiting for connection...') {
+                document.getElementById('qrImage').innerHTML = data.qr;
+                document.getElementById('qrSection').style.display = 'block';
+                document.getElementById('connectedSection').style.display = 'none';
+              }
+              if (data.status === 'Connected') {
+                document.getElementById('qrSection').style.display = 'none';
+                document.getElementById('connectedSection').style.display = 'block';
+              }
+            });
+        }, 5000);
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// API to check QR status
+app.get('/qr-status', (req, res) => {
+  res.json({
+    status: botStatus,
+    qr: qrCode
+  });
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
 
 // Start Venom WhatsApp client
 venom
@@ -14,17 +88,41 @@ venom
     session: 'whatsapp-bot',
     multidevice: true
   })
-  .then((client) => startBot(client))
+  .then((client) => {
+    console.log('✅ Bot is ready! Scanning QR code...');
+    botStatus = 'Ready to scan QR';
+    startBot(client);
+  })
   .catch((error) => {
-    console.log('Error starting bot:', error);
+    console.log('❌ Error starting bot:', error);
+    botStatus = 'Error: ' + error.message;
   });
 
 function startBot(client) {
-  console.log('✅ Bot is ready! Scan QR code to connect.');
+  // Capture QR code
+  client.on('qr', (qr) => {
+    console.log('📱 Scan this QR code:');
+    qrCode = `<img src="${qr}" alt="QR Code"/>`;
+    botStatus = 'Scan QR code with WhatsApp';
+    console.log(qr);
+  });
 
-  // Welcome message when someone sends a message
+  // Connection success
+  client.on('ready', () => {
+    console.log('✅ WhatsApp connected successfully!');
+    botStatus = 'Connected ✅';
+    qrCode = 'Connected!';
+  });
+
+  // When disconnected
+  client.on('disconnected', (reason) => {
+    console.log('❌ Disconnected:', reason);
+    botStatus = 'Disconnected: ' + reason;
+  });
+
+  // Message handler
   client.onMessage(async (message) => {
-    // Ignore messages from groups (optional)
+    // Ignore group messages
     if (message.isGroupMsg) return;
 
     const from = message.from;
@@ -33,19 +131,15 @@ function startBot(client) {
 
     console.log(`📩 Message from ${from}: ${body}`);
 
-    // Show typing indicator (makes it feel human)
+    // Show typing indicator
     await client.sendSeen(from);
     await client.startTyping(from);
-
-    // Wait a moment to simulate human response
     await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Stop typing
     await client.stopTyping(from);
 
-    // --- Menu System ---
     let reply = '';
 
+    // Menu system
     if (body === 'hi' || body === 'hello' || body === 'menu' || body === 'start') {
       reply = `🤖 *Welcome to the Bot!*\n\n` +
         `I'm your personal assistant. Here's what I can do:\n\n` +
@@ -131,7 +225,6 @@ function startBot(client) {
       userSessions[userId] = { ...userSessions[userId], action: 'weather' };
     }
     else if (userSessions[userId]?.action === 'weather') {
-      // Simulated weather response
       const city = body;
       const weatherData = {
         'new york': '☀️ 72°F, Sunny',
@@ -149,31 +242,13 @@ function startBot(client) {
         `Type *help* for quick tips`;
     }
 
-    // Send the reply
     await client.sendText(from, reply);
-
-    // Stop typing after sending
     await client.stopTyping(from);
   });
 
   console.log('🤖 Bot is listening for messages...');
 }
 
-// Express server for Render health checks
-app.get('/', (req, res) => {
-  res.send('🤖 WhatsApp Bot is running!');
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', uptime: process.uptime() });
-});
-
 app.listen(PORT, () => {
   console.log(`🌐 Web server running on port ${PORT}`);
 });
-
-// Self-ping to keep Render awake (runs every 14 minutes)
-setInterval(() => {
-  fetch(`https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost'}/health`)
-    .catch(err => console.log('Self-ping: no response'));
-}, 14 * 60 * 1000);
